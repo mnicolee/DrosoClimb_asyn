@@ -1,8 +1,8 @@
 # DrosoClimb_asyn — TODO
 
-Last updated: 2026-09-17. Nothing has been built yet. This file records the plan and where we stopped.
+Last updated: 2026-09-19. Nothing has been built yet. This file records the plan and where we stopped.
 
-**All counts re-measured 2026-09-17 on 113 ClimbLogs / 339 phases.** The old numbers were from 91 files / 273 phases and are superseded everywhere.
+**Gridding counts re-measured 2026-09-19 on 148 ClimbLogs / 444 phases.** Other counts below are from 2026-09-17 (113 ClimbLogs / 339 phases) unless marked.
 
 ---
 
@@ -49,75 +49,44 @@ Dropping row 0 was the whole problem. The labelling-method argument was mostly a
 
 ---
 
-## STILL OPEN: two things
+## SETTLED 2026-09-19: bursts and uneven frame counts — round to nearest box
+Re-measured on **148 ClimbLogs / 444 phases**. Replaces the DP / tolerance 0.15 proposal.
 
-### 1. Bursts
-### 2. Uneven frame counts per phase (137–152)
+**What a burst is.** Not an extra frame. One frame arrives late (gap before it ~0.3 s), then the next is on time (burst gap 0.066–0.10 s, gap after 0.2 s). Long gap + burst ≈ 0.4 s in 105 of 135 bursts. 0.20% of gaps.
+- Flies barely move across a burst: median 0.32 mm vs 0.98 mm for a normal 0.2 s step (same fly: 46% of its neighbouring step).
+- Burst step bigger than both neighbours in only 9.8% of fly-bursts; the large ones (>10 mm) are tracker jumps, which happen at normal gaps too.
+- Only 8% of bursts in the first 1 s of a phase (not 38% as previously noted).
 
-**Proposed solution for both — awaiting decision.**
+**Rules, per phase:**
+1. Drop row 0 (`.iloc[1:]`), restart the clock at row 1.
+2. **Anchor on the rhythm.** In the first 5 rows, find the first regular gap (0.15–0.25 s). The frame that starts it is the anchor.
+   - Round the anchor's time to its nearest box, then shift the whole phase so the anchor sits exactly on that box. Every row keeps its own X/Y; only the box label moves.
+   - **Tie rule:** if the anchor's time is 0.08–0.12 s past a box (halfway), always send it to the later box, and row 1 goes to box 0.0. Otherwise plain rounding at 0.100 goes either way (floating point).
+   - Example `2026-09-10_13-13-43` third phase: `0, 0.1, 0.299, 0.498` → anchor 0.1 → shift +0.1 → row 1 in box 0.0 (0.1 off), then 0.2, 0.4, 0.6.
+   - 426 phases anchor on row 1 (no shift). 18 do not: 7 at ~0.1 (tie rule), 5 at ~0.133, 3 long first gaps (0.47–1.06 s, missing frames, shift ≈0.002 s), 3 short (0.066, 0.033, 0.032 — row 1 is a burst partner of row 2 and is dropped).
+   - Every phase has a regular gap in its first 5 rows. After anchoring, 0 of 444 phases are off-grid.
+3. Box = `np.floor(t/0.2 + 0.5)`. Not `np.round` — it rounds exact halves to even.
+4. Two frames in one box: **keep the one closest to the box time**, drop the other. Nothing is pushed into a neighbouring box.
+5. Empty box = NaN. Frames past box 149 are dropped.
+6. `RealSeconds` (true time) is used inside the function to pick boxes, then **dropped before saving**. Output CSV has the DrosoClimb layout: `Seconds`, `ExperimentState`, `<genotype> X_n`, `<genotype> Y_n`.
 
-Nearest box, with collisions resolved by assignment instead of deletion. Frames and boxes matched one-to-one, order preserved, minimising total |frame time − box time|, solved exactly by DP (150×150 per phase).
+**Result:**
+- 150 rows per phase, always. Every kept frame within ~0.1 s of its box (mean 0.012 s, p99 0.041 s, max 0.101 s).
+- 93 collisions, incl. 3 row-1 burst partners and 1 spread-out burst (24.531 / 24.698, gap 0.167).
+- 95 of 66,361 frames dropped (0.14%).
+- 334 NaN boxes of 66,600 (0.50%): box 0.0 never NaN, 93 at box 29.8 (camera stopping early), the rest genuine missed frames.
+- In collisions the closest frame is usually the second of the pair (83 of 90 when tested before anchoring).
 
-This is method A, except when two frames want one box it pushes one to a free neighbour rather than deleting it. Cannot collide (injective by construction), cannot drift (anchored to absolute time, not cumsum).
+**Why NaN, not push.** A late frame (e.g. 27.786) was taken at 27.786, not 27.6. Putting it in 27.6 would falsely label its position. The box stays NaN.
 
-Measured on all 339 phases, tolerance 0.15:
-- **150 rows, 0.0 → 29.8, always**
-- mean error **0.014 s**, p99 0.087 s, max 0.149 s
-- **40 frames dropped of 50,650** (0.08%) — vs 103 for plain nearest-box
-- **240 NaN boxes of 50,850** (0.47%), evenly spread except box 149 (74, cameras stopping a hair early)
-- box 0.0 is never NaN; box 0.2 is NaN twice
-- 200 ms for the whole dataset, against 882 ms just reading the CSVs
-
-The old worked example resolves cleanly — no drift, no collision:
+Worked example:
 ```
-row   Seconds   gap    A box   B box   DP box
-121   24.232    0.201   24.2    24.0    24.2
-122   24.531    0.299   24.6    24.2    24.6
-123   24.698    0.167   24.6    24.4    dropped (genuine surplus)
-124   24.830    0.132   24.8    24.6    24.8
-```
-
-**The burst threshold disappears.** No 0.08 vs 0.10 cutoff is needed — assignment by absolute time handles bursts implicitly, and where a frame genuinely has nowhere to go the DP keeps whichever is closest. This supersedes the old contradiction between "keep the later frame" and "keep whichever is closest".
-
-Why tolerance 0.15:
-
-| tol | frames deleted | worst-case gap between two flies in one box |
-|---|---|---|
-| 0.10 | 103 | 0.2 s |
-| **0.15** | **40** | **0.3 s** |
-| 0.20 | 9 | 0.4 s — a full box, too loose |
-
-Because `RealSeconds` carries each frame's true time, placement error only affects cross-fly averaging. Deletion loses a data point outright, so retention is worth more.
-
-```python
-def gridphase(t, tol):
-    import numpy as np
-
-    boxt = np.arange(150)*0.2
-    cost = np.abs(t[:,None] - boxt[None,:])
-    cost[cost > tol] = np.inf
-    dp = np.full((len(t)+1, 151), np.inf)
-    dp[0,:] = 0
-    dp[:,0] = np.arange(len(t)+1)*0.25
-    for i in range(1, len(t)+1):
-        dp[i,1:] = np.minimum.accumulate(np.minimum(dp[i-1,:-1]+cost[i-1], dp[i-1,1:]+0.25))
-
-    boxes = []
-    rows = []
-    i = len(t)
-    k = 150
-    while i > 0 and k > 0:
-        if dp[i,k] == dp[i,k-1]:
-            k = k-1
-        elif dp[i-1,k-1] + cost[i-1,k-1] <= dp[i-1,k] + 0.25:
-            boxes.append(k-1)
-            rows.append(i-1)
-            i = i-1
-            k = k-1
-        else:
-            i = i-1
-
-    return boxes[::-1], rows[::-1]
+Seconds   gap     box
+24.232   0.201   24.2
+24.531   0.299   24.6   kept (0.069 off)
+24.698   0.167   24.6   dropped (0.098 off)
+24.830   0.132   24.8
+                 24.4 = NaN
 ```
 
 ---
@@ -153,7 +122,7 @@ There is no timestamp value true for all 173 flies at once. PD is the same — p
 
 ---
 
-## Falls: gate on dt, do NOT rescale the threshold
+## Falls: do NOT rescale the threshold
 
 The `-3.17` mm threshold is per-frame and only meaningful at the dt it was fitted on. Measured scaling of the negative tail over 616,982 fly-frame transitions:
 
@@ -166,14 +135,8 @@ The `-3.17` mm threshold is per-frame and only meaningful at the dt it was fitte
 
 Not linear. Converting to −15.85 mm/s and applying at any dt would over-flag badly on long gaps. The tail stays flat at ≈−7 to −9 mm regardless of dt because it is **tracker jumps** — per-frame errors, not per-second. Which is why the confusion matrix landed on a per-frame threshold.
 
-```python
-dy = Y.diff()
-dt = df['RealSeconds'].diff()
-fall = np.where(dt.between(0.15, 0.25), (dy < -3.17).astype(float), np.nan)
-```
-- Costs **1.01%** of transitions.
-- NaN, not 0 — "couldn't tell", not "no fall". `sum(skipna=True)` with a shrinking denominator stays honest.
-- Nearly free on the grid anyway: adjacent filled boxes are 0.2 s apart by construction, and a NaN box makes `diff()` NaN on its own.
+**Updated 2026-09-19:** `RealSeconds` is not in the output, so no dt gate. On the grid, neighbouring filled boxes are 0.2 s apart (97.25% within 10%), and a NaN box makes `diff()` NaN on its own. So `fallso` as is, `dy = Y.diff()`, `dy < -3.17`.
+- Keep a NaN `diff()` as NaN, not 0 — "couldn't tell", not "no fall". `sum(skipna=True)` with a shrinking denominator stays honest.
 
 **Open:** the −3.17 mm threshold was fitted on DrosoClimb data. If the PD rig or arena differs it should be re-derived by the same confusion-matrix method.
 
@@ -183,9 +146,9 @@ fall = np.where(dt.between(0.15, 0.25), (dy < -3.17).astype(float), np.nan)
 
 ## Findings that still stand (do not re-check)
 
-**Gridding distorts speed.** 96.9% of intervals are within 10% of 0.2 s, but 0.6% are off by >20% (worst = 2×). Self-cancels over pairs (99.2% within 10% over 2 intervals). **Fix: output a `RealSeconds` column alongside `Seconds`** and use it for speed/displacement denominators.
+**Gridding distorts speed.** 96.9% of intervals are within 10% of 0.2 s, but 0.6% are off by >20% (worst = 2×). Self-cancels over pairs (99.2% within 10% over 2 intervals). **Decided 2026-09-19: not fixed.** With the final gridding rules, 97.25% of neighbouring-box intervals are within 10% of 0.2 s, 0.43% off by >20%, true gap 0.099–0.3 s. Accepted; speed divides by 0.2 as in DrosoClimb.
 
-**Bursts cluster at phase start.** 38% in the first 1 s, 44% in the first 3 s. Same in all three phases, so it recurs at every tap-and-OK restart. Dropped frames show no such clustering.
+**Bursts do not cluster at phase start** (2026-09-19, 148 files): 8% in the first 1 s, 13% in the first 3 s. Supersedes the old 38% / 44%.
 
 **Burst frames barely move.** Median displacement between the two frames of a burst is 0.43 mm (42% of a normal step).
 
@@ -246,7 +209,7 @@ Then pasted the fabricated `Seconds` alongside with `concat(axis=1)`. Raw dark f
 - **For each phase:**
   - Filter on the phase name.
   - `.iloc[1:]` to drop row 0, then restart Seconds.
-  - Place frames on the fixed 150-box grid (method above, pending decision).
+  - Anchor on the first regular gap in the first 5 rows (with tie rule), then round to the nearest box (rules above).
   - Empty boxes are NaN.
   - Exactly 150 rows per phase, always.
 - Drop fly columns more than 50% empty (as in `removenans`).
@@ -265,15 +228,15 @@ Then pasted the fabricated `Seconds` alongside with `concat(axis=1)`. Raw dark f
 ---
 
 ## Remaining steps (in order)
-1. **Decide the gridding method** (the DP proposal above). Bursts and uneven frame counts both fall out of it; no separate burst threshold needed.
+1. ~~Decide the gridding method~~ — settled 2026-09-19: round to nearest box, keep closest, NaN otherwise (see above).
 2. Write `1. Renamingfiles.ipynb`, then do a **dry run**: list every copy and folder it would create, and confirm before copying.
-3. Run step 1 and check file counts match the raw data (113 ClimbLogs as of 2026-09-17).
+3. Run step 1 and check file counts match the raw data (148 ClimbLogs as of 2026-09-19).
 4. Write `NLCLIMB_asyn.py` (the `fivefps` equivalent, plus `removenans`, `onlycolsneeded`, `cleanup` adapted to 3 × 150 rows) and `2. Fileprocessing.ipynb`.
-   - Add a **`RealSeconds`** column so speed/displacement can use true dt.
+   - `RealSeconds` only inside the function; drop it before `to_csv`.
    - Do **not** port `timegroup` + `head(5)`.
    - `.iloc[1:]` per phase — no NaN check.
 5. Run step 3 and check each output has 450 rows (3 × 150) and sensible NaN counts. Look at the short phase (136 real frames) specifically.
-   - Validated end-to-end on `elav x 8147_D10`: 450 rows × 95 cols, `Seconds` 0.0–29.8 per phase, 92 fly columns surviving `removenans`, 6.33% NaN, `max |RealSeconds − Seconds| = 0.037 s`.
+   - Old test with the DP method on `elav x 8147_D10`: 450 rows × 95 cols, 92 fly columns surviving `removenans`, 6.33% NaN. Re-check with the final rules.
 6. **Later: analysis stage.**
    - Pair each experimental genotype with its controls.
    - There are **no** `w1118 x 51375`, `x 51376`, `x 8146`, `x 8147` or `w1118 x Alrm` controls; only driver-side ones (`w1118 x elav`, `w1118 x VT009792`, `w1118 x 95240`, `w1118 x ddc`, `w1118 x repo`).
@@ -290,9 +253,9 @@ Then pasted the fabricated `Seconds` alongside with `concat(axis=1)`. Raw dark f
    - `meangraph` (419) — mean and 95% CI across flies at each time point. **Needs the grid**, `mean(axis=1)` over flies from different recordings. Only called in `Generic line plots.ipynb`.
    - `fallcalc` (433) — **misnamed.** Returns the fraction of flies falling in each 0.2 s frame, not falls per second. `Fall_k` is a per-row 0/1 flag from `fallso`. **Needs the grid.** Only called in `Generic line plots.ipynb`.
    - `calcgraph` (396) — **does not average across flies**, no `axis=1` anywhere. Simpler than previously thought: the `-23` / `-46` are hardcoded offsets into the fabricated `arange(0,66,0.2)`. For PD it is just `Seconds` as-is, since each phase already restarts at 0.
-   - `distpersec` (597) — `iloc[::5]` → `groupby(RealSeconds.floordiv(1)).first()`. Per-fly, easy.
+   - `distpersec` (597) — `iloc[::5]` is safe on the grid (5 rows = 1 s). Port as is.
    - `sectioneddispchunks` (620) — exact `Seconds == nnum` match → range match. Per-fly, easy.
-   - `speedcalc` (251) — `ca = 1/fps` hardcoded at line 276 → `df_disp.div(df['RealSeconds'].diff().values, axis=0)`. Per-fly, one line.
+   - `speedcalc` (251) — `ca = 1/fps` stays; no `RealSeconds` in the output (decided 2026-09-19).
    - Port cleanly with name fixes only: `fallso`, `pausing`, `boutdisplacement`, `boutheight`, `pauseheight`, `boutspeed`, `pausenumber`, `maxvelocity`, `totalheight`.
 
 ---
